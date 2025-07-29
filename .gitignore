@@ -1,0 +1,9 @@
+# Terraform
+.terraform/
+*.tfplan
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+crash.log
+.DS_Store # Para usuários macOS
+
