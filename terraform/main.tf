@@ -11,6 +11,12 @@ provider "aws" {
   region = "us-east-1"
 }
 
+variable "db_master_password" {
+  type        = string
+  description = "DB Password."
+  sensitive   = true
+}
+
 # Criar uma "coisa" IoT
 resource "aws_iot_thing" "sensor_home" {
   name = "sensor1"
@@ -201,4 +207,110 @@ resource "aws_lambda_event_source_mapping" "kinesis_lambda" {
   event_source_arn  = aws_kinesis_stream.stream_sensores.arn
   function_name     = aws_lambda_function.processador_dados.arn
   starting_position = "LATEST"
+}
+# Subnet group para RDS (obrigatório)
+resource "aws_db_subnet_group" "iot_subnet_group" {
+  name       = "iot-subnet-group"
+  subnet_ids = [aws_subnet.subnet_a.id, aws_subnet.subnet_b.id]
+  
+  tags = {
+    Name = "IoT DB subnet group"
+  }
+}
+
+# VPC (rede virtual)
+resource "aws_vpc" "iot_vpc" {
+  cidr_block           = "10.0.0.0/16"
+  enable_dns_hostnames = true
+  enable_dns_support   = true
+  
+  tags = {
+    Name = "IoT VPC"
+  }
+}
+
+# Subnets (sub-redes)
+resource "aws_subnet" "subnet_a" {
+  vpc_id            = aws_vpc.iot_vpc.id
+  cidr_block        = "10.0.1.0/24"
+  availability_zone = "us-east-1c"
+  
+  tags = {
+    Name = "IoT Subnet A"
+  }
+}
+
+resource "aws_subnet" "subnet_b" {
+  vpc_id            = aws_vpc.iot_vpc.id
+  cidr_block        = "10.0.2.0/24"
+  availability_zone = "us-east-1d"
+  
+  tags = {
+    Name = "IoT Subnet B"
+  }
+}
+
+# Internet Gateway
+resource "aws_internet_gateway" "iot_igw" {
+  vpc_id = aws_vpc.iot_vpc.id
+  
+  tags = {
+    Name = "IoT Internet Gateway"
+  }
+}
+
+# Security Group para RDS
+resource "aws_security_group" "rds_sg" {
+  name_prefix = "rds-sg"
+  vpc_id      = aws_vpc.iot_vpc.id
+
+  ingress {
+    from_port   = 3306
+    to_port     = 3306
+    protocol    = "tcp"
+    cidr_blocks = ["10.0.0.0/16"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+# RDS Aurora Serverless
+resource "aws_rds_cluster" "iot_database" {
+  cluster_identifier      = "iot-database"
+  engine                 = "aurora-mysql"
+  
+  database_name          = "iotdata"
+  master_username        = "admin"
+  master_password        = var.db_master_password
+  
+  db_subnet_group_name   = aws_db_subnet_group.iot_subnet_group.name
+  vpc_security_group_ids = [aws_security_group.rds_sg.id]
+  
+  skip_final_snapshot = true  # Para testes
+  
+  
+  tags = {
+    Name = "IoT Database"
+  }
+}
+
+# instância do cluster
+resource "aws_rds_cluster_instance" "cluster_instances" {
+  identifier         = "iot-database-instance-1"
+  cluster_identifier = aws_rds_cluster.iot_database.id
+  engine             = aws_rds_cluster.iot_database.engine
+  instance_class     = "db.t3.medium" # Escolha um tipo de instância
+}
+# Outputs importantes
+output "database_endpoint" {
+  value = aws_rds_cluster.iot_database.endpoint
+}
+
+output "kinesis_stream_name" {
+  value = aws_kinesis_stream.stream_sensores.name
 }
