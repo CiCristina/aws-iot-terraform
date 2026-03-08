@@ -11,6 +11,9 @@ provider "aws" {
   region = "us-east-1"
 }
 
+# Busca o Account ID automaticamente
+data "aws_caller_identity" "current" {}
+
 variable "db_master_password" {
   type        = string
   description = "DB Password."
@@ -26,6 +29,7 @@ resource "aws_iot_thing" "sensor_home" {
     localizacao = "bedroom"
   }
 }
+
 # Certificado para o dispositivo
 resource "aws_iot_certificate" "cert_sensor" {
   active = true
@@ -45,8 +49,8 @@ resource "aws_iot_policy" "policy_sensor" {
           "iot:Receive"
         ]
         Resource = [
-          "arn:aws:iot:us-east-1:<945189317719>:topic/sensor_home/temperatura",
-          "arn:aws:iot:us-east-1:<945189317719>:topic/$aws/things/sensor1/shadow/*" # Se usar shadows
+          "arn:aws:iot:us-east-1:${data.aws_caller_identity.current.account_id}:topic/sensor_home/temperatura",
+          "arn:aws:iot:us-east-1:${data.aws_caller_identity.current.account_id}:topic/$aws/things/sensor1/shadow/*"
         ]
       },
       {
@@ -55,8 +59,8 @@ resource "aws_iot_policy" "policy_sensor" {
           "iot:Subscribe"
         ]
         Resource = [
-          "arn:aws:iot:us-east-1:<945189317719>:topicfilter/sensor_home/temperatura",
-          "arn:aws:iot:us-east-1:<945189317719>:topicfilter/$aws/things/sensor1/shadow/*" # Se usar shadows
+          "arn:aws:iot:us-east-1:${data.aws_caller_identity.current.account_id}:topicfilter/sensor_home/temperatura",
+          "arn:aws:iot:us-east-1:${data.aws_caller_identity.current.account_id}:topicfilter/$aws/things/sensor1/shadow/*"
         ]
       },
       {
@@ -65,9 +69,9 @@ resource "aws_iot_policy" "policy_sensor" {
           "iot:Connect"
         ],
         Resource = [
-          "arn:aws:iot:us-east-1:<945189317719>:client/sensor1"
+          "arn:aws:iot:us-east-1:${data.aws_caller_identity.current.account_id}:client/sensor1"
         ]
-       }
+      }
     ]
   })
 }
@@ -83,6 +87,7 @@ resource "aws_iot_thing_principal_attachment" "cert_thing" {
   thing     = aws_iot_thing.sensor_home.name
   principal = aws_iot_certificate.cert_sensor.arn
 }
+
 # Stream para receber dados dos sensores
 resource "aws_kinesis_stream" "stream_sensores" {
   name             = "iot-dados-sensores"
@@ -93,6 +98,7 @@ resource "aws_kinesis_stream" "stream_sensores" {
     Projeto = "IoT-Migration"
   }
 }
+
 # Regra que manda dados do IoT para o Kinesis
 resource "aws_iot_topic_rule" "regra_kinesis" {
   name        = "MandarParaKinesis"
@@ -107,7 +113,7 @@ resource "aws_iot_topic_rule" "regra_kinesis" {
   }
 }
 
-# Role para IoT acessar Kinesis
+# Role para IoT/ Lambda acessar Kinesis
 resource "aws_iam_role" "iot_role" {
   name = "IoT-Kinesis-Role"
 
@@ -144,14 +150,15 @@ resource "aws_iam_role_policy" "iot_kinesis_policy" {
     ]
   })
 }
+
 # Lambda function
 resource "aws_lambda_function" "processador_dados" {
   filename         = "../lambda-functions/processador-dados.zip"
   function_name    = "processador-dados-iot"
-  role            = aws_iam_role.lambda_role.arn
-  handler         = "index.handler"
-  runtime         = "nodejs18.x"
-  timeout         = 60
+  role             = aws_iam_role.lambda_role.arn
+  handler          = "index.handler"
+  runtime          = "nodejs18.x"
+  timeout          = 60
 
   source_code_hash = filebase64sha256("../lambda-functions/processador-dados.zip")
 }
@@ -208,15 +215,6 @@ resource "aws_lambda_event_source_mapping" "kinesis_lambda" {
   function_name     = aws_lambda_function.processador_dados.arn
   starting_position = "LATEST"
 }
-# Subnet group para RDS (obrigatório)
-resource "aws_db_subnet_group" "iot_subnet_group" {
-  name       = "iot-subnet-group"
-  subnet_ids = [aws_subnet.subnet_a.id, aws_subnet.subnet_b.id]
-  
-  tags = {
-    Name = "IoT DB subnet group"
-  }
-}
 
 # VPC (rede virtual)
 resource "aws_vpc" "iot_vpc" {
@@ -259,6 +257,30 @@ resource "aws_internet_gateway" "iot_igw" {
   }
 }
 
+# Route Table — Define pra onde vai o tráfego que sai da VPC
+resource "aws_route_table" "iot_rt" {
+  vpc_id = aws_vpc.iot_vpc.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.iot_igw.id
+  }
+
+  tags = {
+    Name = "IoT Route Table"
+  }
+}
+
+resource "aws_route_table_association" "rta_subnet_a" {
+  subnet_id      = aws_subnet.subnet_a.id
+  route_table_id = aws_route_table.iot_rt.id
+}
+
+resource "aws_route_table_association" "rta_subnet_b" {
+  subnet_id      = aws_subnet.subnet_b.id
+  route_table_id = aws_route_table.iot_rt.id
+}
+
 # Security Group para RDS
 resource "aws_security_group" "rds_sg" {
   name_prefix = "rds-sg"
@@ -279,33 +301,51 @@ resource "aws_security_group" "rds_sg" {
   }
 }
 
-# RDS Aurora Serverless
+# Subnet group para RDS (obrigatório)
+resource "aws_db_subnet_group" "iot_subnet_group" {
+  name       = "iot-subnet-group"
+  subnet_ids = [aws_subnet.subnet_a.id, aws_subnet.subnet_b.id]
+  
+  tags = {
+    Name = "IoT DB subnet group"
+  }
+}
+
 resource "aws_rds_cluster" "iot_database" {
   cluster_identifier      = "iot-database"
-  engine                 = "aurora-mysql"
+  engine                  = "aurora-mysql"
+  engine_mode             = "provisioned"
+  engine_version          = "8.0.mysql_aurora.3.04.0"
   
-  database_name          = "iotdata"
-  master_username        = "admin"
-  master_password        = var.db_master_password
+  database_name           = "iotdata"
+  master_username         = "admin"
+  master_password         = var.db_master_password
   
-  db_subnet_group_name   = aws_db_subnet_group.iot_subnet_group.name
-  vpc_security_group_ids = [aws_security_group.rds_sg.id]
+  db_subnet_group_name    = aws_db_subnet_group.iot_subnet_group.name
+  vpc_security_group_ids  = [aws_security_group.rds_sg.id]
   
-  skip_final_snapshot = true  # Para testes
+  skip_final_snapshot     = true
+
   
-  
+  serverlessv2_scaling_configuration {
+    min_capacity = 0.5
+    max_capacity = 1.0
+  }
+
   tags = {
     Name = "IoT Database"
   }
 }
 
-# instância do cluster
+# Instância do cluster usando Serverless v2
 resource "aws_rds_cluster_instance" "cluster_instances" {
   identifier         = "iot-database-instance-1"
   cluster_identifier = aws_rds_cluster.iot_database.id
   engine             = aws_rds_cluster.iot_database.engine
-  instance_class     = "db.t3.medium" # Escolha um tipo de instância
+  engine_version     = aws_rds_cluster.iot_database.engine_version
+  instance_class     = "db.serverless" 
 }
+
 # Outputs importantes
 output "database_endpoint" {
   value = aws_rds_cluster.iot_database.endpoint
