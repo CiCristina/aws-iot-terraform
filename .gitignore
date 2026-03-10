@@ -8,3 +8,5 @@
 crash.log
 .DS_Store # Para usuários macOS
 
+# Certificados IoT — nunca subir pro GitHub
+scripts/certs/
