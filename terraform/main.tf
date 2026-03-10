@@ -277,42 +277,30 @@ resource "aws_db_subnet_group" "iot_subnet_group" {
   }
 }
 
-# RDS
-resource "aws_rds_cluster" "iot_database" {
-  cluster_identifier     = "iot-database"
-  engine                 = "aurora-mysql"
-  engine_mode            = "provisioned"
-  engine_version         = "8.0.mysql_aurora.3.04.0"
+# RDS MySQL — free tier (db.t3.micro = 750h/mês grátis)
+resource "aws_db_instance" "iot_database" {
+  identifier        = "iot-database"
+  engine            = "mysql"
+  engine_version    = "8.0"
+  instance_class    = "db.t3.micro"
   
-  database_name          = "iotdata"
-  master_username        = "admin"
-  master_password        = var.db_master_password
+  db_name           = "iotdata"
+  username          = "admin"
+  password          = var.db_master_password
   
   db_subnet_group_name   = aws_db_subnet_group.iot_subnet_group.name
   vpc_security_group_ids = [aws_security_group.rds_sg.id]
   
-  skip_final_snapshot    = true
-
-  serverlessv2_scaling_configuration {
-    min_capacity = 0.5
-    max_capacity = 1.0
-  }
-
+  allocated_storage = 20  # GB mínimo
+  
+  skip_final_snapshot = true
+  
   tags = {
     Name = "IoT Database"
   }
 }
 
- # Instância do cluster usando Serverless v2
-resource "aws_rds_cluster_instance" "cluster_instances" {
-  identifier         = "iot-database-instance-1"
-  cluster_identifier = aws_rds_cluster.iot_database.id
-  engine             = aws_rds_cluster.iot_database.engine
-  engine_version     = aws_rds_cluster.iot_database.engine_version
-  instance_class     = "db.serverless"
-}
-
-# Outputs
+# Output
 output "database_endpoint" {
-  value = aws_rds_cluster.iot_database.endpoint
+  value = aws_db_instance.iot_database.endpoint
 }
