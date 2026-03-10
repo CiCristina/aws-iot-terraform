@@ -88,34 +88,22 @@ resource "aws_iot_thing_principal_attachment" "cert_thing" {
   principal = aws_iot_certificate.cert_sensor.arn
 }
 
-# Stream para receber dados dos sensores
-resource "aws_kinesis_stream" "stream_sensores" {
-  name             = "iot-dados-sensores"
-  shard_count      = 1
-  retention_period = 24
-  
-  tags = {
-    Projeto = "IoT-Migration"
-  }
-}
-
-# Regra que manda dados do IoT para o Kinesis
-resource "aws_iot_topic_rule" "regra_kinesis" {
-  name        = "MandarParaKinesis"
-  description = "Manda dados dos sensores para Kinesis"
+# Regra IoT chamando o lambda diretamente
+resource "aws_iot_topic_rule" "regra_lambda" {
+  name        = "MandarParaLambda"
+  description = "Manda dados dos sensores direto para Lambda"
   enabled     = true
-  sql         = "SELECT * FROM 'topic/sensor/data'"
+  sql         = "SELECT * FROM 'sensor_home/temperatura'"
   sql_version = "2016-03-23"
 
-  kinesis {
-    stream_name = aws_kinesis_stream.stream_sensores.name
-    role_arn    = aws_iam_role.iot_role.arn
+  lambda {
+    function_arn = aws_lambda_function.processador_dados.arn
   }
 }
 
-# Role para IoT/ Lambda acessar Kinesis
+#Criando permissao Role do IoT pra invocar Lambda
 resource "aws_iam_role" "iot_role" {
-  name = "IoT-Kinesis-Role"
+  name = "IoT-Lambda-Role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -131,9 +119,9 @@ resource "aws_iam_role" "iot_role" {
   })
 }
 
-# Permissão para escrever no Kinesis
-resource "aws_iam_role_policy" "iot_kinesis_policy" {
-  name = "IoT-Kinesis-Policy"
+# Permissão pra IoT invocar Lambda
+resource "aws_iam_role_policy" "iot_lambda_policy" {
+  name = "IoT-Lambda-Policy"
   role = aws_iam_role.iot_role.id
 
   policy = jsonencode({
@@ -141,14 +129,21 @@ resource "aws_iam_role_policy" "iot_kinesis_policy" {
     Statement = [
       {
         Effect = "Allow"
-        Action = [
-          "kinesis:PutRecord",
-          "kinesis:PutRecords"
-        ]
-        Resource = aws_kinesis_stream.stream_sensores.arn
+        Action = "lambda:InvokeFunction"
+        Resource = aws_lambda_function.processador_dados.arn
       }
     ]
   })
+}
+
+# Permissão pro IoT Core invocar a Lambda alem do Role. O IoT Core precisa de permissão
+# explícita pra chamar a função Lambda
+resource "aws_lambda_permission" "iot_invoke_lambda" {
+  statement_id  = "AllowIoTInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.processador_dados.function_name
+  principal     = "iot.amazonaws.com"
+  source_arn    = aws_iot_topic_rule.regra_lambda.arn
 }
 
 # Lambda function
@@ -181,42 +176,13 @@ resource "aws_iam_role" "lambda_role" {
   })
 }
 
-# Permissões básicas para Lambda
+# Permissões básicas para Lambda 
 resource "aws_iam_role_policy_attachment" "lambda_basic" {
   role       = aws_iam_role.lambda_role.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
-# Permissão para ler do Kinesis
-resource "aws_iam_role_policy" "lambda_kinesis" {
-  name = "lambda-kinesis-policy"
-  role = aws_iam_role.lambda_role.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "kinesis:DescribeStream",
-          "kinesis:GetShardIterator",
-          "kinesis:GetRecords",
-          "kinesis:ListStreams"
-        ]
-        Resource = aws_kinesis_stream.stream_sensores.arn
-      }
-    ]
-  })
-}
-
-# Trigger: Kinesis → Lambda
-resource "aws_lambda_event_source_mapping" "kinesis_lambda" {
-  event_source_arn  = aws_kinesis_stream.stream_sensores.arn
-  function_name     = aws_lambda_function.processador_dados.arn
-  starting_position = "LATEST"
-}
-
-# VPC (rede virtual)
+# VPC — igual antes
 resource "aws_vpc" "iot_vpc" {
   cidr_block           = "10.0.0.0/16"
   enable_dns_hostnames = true
@@ -227,7 +193,7 @@ resource "aws_vpc" "iot_vpc" {
   }
 }
 
-# Subnets (sub-redes)
+# Subnets
 resource "aws_subnet" "subnet_a" {
   vpc_id            = aws_vpc.iot_vpc.id
   cidr_block        = "10.0.1.0/24"
@@ -248,7 +214,7 @@ resource "aws_subnet" "subnet_b" {
   }
 }
 
-# Internet Gateway
+# Internet Gateway 
 resource "aws_internet_gateway" "iot_igw" {
   vpc_id = aws_vpc.iot_vpc.id
   
@@ -281,7 +247,7 @@ resource "aws_route_table_association" "rta_subnet_b" {
   route_table_id = aws_route_table.iot_rt.id
 }
 
-# Security Group para RDS
+ # Security Group para RDS 
 resource "aws_security_group" "rds_sg" {
   name_prefix = "rds-sg"
   vpc_id      = aws_vpc.iot_vpc.id
@@ -311,22 +277,22 @@ resource "aws_db_subnet_group" "iot_subnet_group" {
   }
 }
 
+# RDS
 resource "aws_rds_cluster" "iot_database" {
-  cluster_identifier      = "iot-database"
-  engine                  = "aurora-mysql"
-  engine_mode             = "provisioned"
-  engine_version          = "8.0.mysql_aurora.3.04.0"
+  cluster_identifier     = "iot-database"
+  engine                 = "aurora-mysql"
+  engine_mode            = "provisioned"
+  engine_version         = "8.0.mysql_aurora.3.04.0"
   
-  database_name           = "iotdata"
-  master_username         = "admin"
-  master_password         = var.db_master_password
+  database_name          = "iotdata"
+  master_username        = "admin"
+  master_password        = var.db_master_password
   
-  db_subnet_group_name    = aws_db_subnet_group.iot_subnet_group.name
-  vpc_security_group_ids  = [aws_security_group.rds_sg.id]
+  db_subnet_group_name   = aws_db_subnet_group.iot_subnet_group.name
+  vpc_security_group_ids = [aws_security_group.rds_sg.id]
   
-  skip_final_snapshot     = true
+  skip_final_snapshot    = true
 
-  
   serverlessv2_scaling_configuration {
     min_capacity = 0.5
     max_capacity = 1.0
@@ -337,20 +303,16 @@ resource "aws_rds_cluster" "iot_database" {
   }
 }
 
-# Instância do cluster usando Serverless v2
+ # Instância do cluster usando Serverless v2
 resource "aws_rds_cluster_instance" "cluster_instances" {
   identifier         = "iot-database-instance-1"
   cluster_identifier = aws_rds_cluster.iot_database.id
   engine             = aws_rds_cluster.iot_database.engine
   engine_version     = aws_rds_cluster.iot_database.engine_version
-  instance_class     = "db.serverless" 
+  instance_class     = "db.serverless"
 }
 
-# Outputs importantes
+# Outputs
 output "database_endpoint" {
   value = aws_rds_cluster.iot_database.endpoint
-}
-
-output "kinesis_stream_name" {
-  value = aws_kinesis_stream.stream_sensores.name
 }
