@@ -155,7 +155,23 @@ resource "aws_lambda_function" "processador_dados" {
   runtime          = "nodejs18.x"
   timeout          = 60
 
-  source_code_hash = filebase64sha256("../lambda-functions/processador-dados.zip")
+  #precisamos dizer pra Lambda onde estão os valores do process.env.DB_HOST por ex. Variaveis de ambiente - conectam a Lambda ao RDS
+  environment { 
+  variables = {
+    DB_HOST     = aws_db_instance.iot_database.address
+    DB_USER     = "admin"
+    DB_PASSWORD = var.db_master_password
+    DB_NAME     = "iotdata"
+    }
+  }
+
+  #Config lambda para rodar dentro da VPC. Aqui estou falando em quais subnets ela vai rodar, ainda falta dar permissao. Adicionar VPC config na Lamba. Aqui temos duas subnets por causa de resiliencia e m relacao as availability zones
+  vpc_config {
+    subnet_ids         = [aws_subnet.subnet_a.id, aws_subnet.subnet_b.id]
+    security_group_ids = [aws_security_group.rds_sg.id]
+  }
+
+source_code_hash = filebase64sha256("../lambda-functions/processador-dados.zip") #Para terraform ver se o arquivo ZIP mudou e se tem necessidade de fazer o upload novamente/ pega o arquivo, processa matematicamente e retorna uma string única.
 }
 
 # Role para Lambda
@@ -180,6 +196,12 @@ resource "aws_iam_role" "lambda_role" {
 resource "aws_iam_role_policy_attachment" "lambda_basic" {
   role       = aws_iam_role.lambda_role.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+# Permissões  na IAM Role para Lambda acessar recursos dentro da VPC (RDS)
+resource "aws_iam_role_policy_attachment" "lambda_vpc" {
+  role       = aws_iam_role.lambda_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
 }
 
 # VPC — igual antes
