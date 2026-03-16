@@ -326,3 +326,125 @@ resource "aws_db_instance" "iot_database" {
 output "database_endpoint" {
   value = aws_db_instance.iot_database.endpoint
 }
+
+# Lambda buscador de leituras
+resource "aws_iam_role" "lambda_reader_role" {
+  name = "lambda-reader-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "lambda.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "lambda_reader_basic" {
+  role       = aws_iam_role.lambda_reader_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+resource "aws_iam_role_policy_attachment" "lambda_reader_vpc" {
+  role       = aws_iam_role.lambda_reader_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+}
+
+resource "aws_lambda_function" "buscador_leituras" {
+  filename      = "../lambda-functions/buscador-leituras.zip"
+  function_name = "buscador-leituras-iot"
+  role          = aws_iam_role.lambda_reader_role.arn
+  handler       = "index.handler"
+  runtime       = "nodejs18.x"
+  timeout       = 30
+
+  environment {
+    variables = {
+      DB_HOST     = aws_db_instance.iot_database.address
+      DB_USER     = "admin"
+      DB_PASSWORD = var.db_master_password
+      DB_NAME     = "iotdata"
+    }
+  }
+
+  vpc_config {
+    subnet_ids         = [aws_subnet.subnet_a.id, aws_subnet.subnet_b.id]
+    security_group_ids = [aws_security_group.rds_sg.id]
+  }
+
+  source_code_hash = filebase64sha256("../lambda-functions/buscador-leituras.zip")
+}
+
+# API Gateway
+resource "aws_api_gateway_rest_api" "iot_api" {
+  name        = "iot-sensor-api"
+  description = "API para consultar leituras dos sensores"
+}
+
+resource "aws_api_gateway_resource" "leituras" {
+  rest_api_id = aws_api_gateway_rest_api.iot_api.id
+  parent_id   = aws_api_gateway_rest_api.iot_api.root_resource_id
+  path_part   = "leituras"
+}
+
+resource "aws_api_gateway_resource" "leituras_ultima" {
+  rest_api_id = aws_api_gateway_rest_api.iot_api.id
+  parent_id   = aws_api_gateway_resource.leituras.id
+  path_part   = "ultima"
+}
+
+#métodos GET para os recursos da API e integração com a Lambda buscadora de leituras
+resource "aws_api_gateway_method" "get_leituras" {
+  rest_api_id   = aws_api_gateway_rest_api.iot_api.id
+  resource_id   = aws_api_gateway_resource.leituras.id
+  http_method   = "GET"
+  authorization = "NONE"
+}
+
+resource "aws_api_gateway_method" "get_leituras_ultima" {
+  rest_api_id   = aws_api_gateway_rest_api.iot_api.id
+  resource_id   = aws_api_gateway_resource.leituras_ultima.id
+  http_method   = "GET"
+  authorization = "NONE"
+}
+
+resource "aws_api_gateway_integration" "integration_leituras" {
+  rest_api_id             = aws_api_gateway_rest_api.iot_api.id
+  resource_id             = aws_api_gateway_resource.leituras.id
+  http_method             = aws_api_gateway_method.get_leituras.http_method
+  integration_http_method = "POST"
+  type                    = "AWS_PROXY"
+  uri                     = aws_lambda_function.buscador_leituras.invoke_arn
+}
+
+resource "aws_api_gateway_integration" "integration_leituras_ultima" {
+  rest_api_id             = aws_api_gateway_rest_api.iot_api.id
+  resource_id             = aws_api_gateway_resource.leituras_ultima.id
+  http_method             = aws_api_gateway_method.get_leituras_ultima.http_method
+  integration_http_method = "POST"
+  type                    = "AWS_PROXY"
+  uri                     = aws_lambda_function.buscador_leituras.invoke_arn
+}
+
+resource "aws_lambda_permission" "api_gateway_invoke" {
+  statement_id  = "AllowAPIGatewayInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.buscador_leituras.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_api_gateway_rest_api.iot_api.execution_arn}/*/*"
+}
+
+resource "aws_api_gateway_deployment" "iot_api_deployment" {
+  rest_api_id = aws_api_gateway_rest_api.iot_api.id
+  stage_name  = "prod"
+
+  depends_on = [
+    aws_api_gateway_integration.integration_leituras,
+    aws_api_gateway_integration.integration_leituras_ultima
+  ]
+}
+
+output "api_url" {
+  value = "${aws_api_gateway_deployment.iot_api_deployment.invoke_url}/leituras"
+}
